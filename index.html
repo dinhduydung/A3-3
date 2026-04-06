@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Ứng dụng đếm ngược - Điều khiển LED</title>
+<title>Hệ thống đếm ngược - Chế độ ON/OFF</title>
 <style>
   body { font-family: Arial, sans-serif; background: #fff; margin: 5px; }
   .row { display: flex; flex-wrap: wrap; margin-bottom: 5px; }
@@ -49,10 +49,10 @@
   const app = initializeApp(firebaseConfig);
   const database = getDatabase(app);
 
-  // Hàm gửi lệnh trực tiếp vào nhánh 'thietbi'
+  // Gửi chính xác chữ "ON" hoặc "OFF" vào nhánh 'thietbi'
   function notifyESP(label, action) {
-    const val = (action === "ON") ? 1 : 0;
-    set(ref(database, 'thietbi/' + label), val);
+    // action truyền vào là "ON" hoặc "OFF"
+    set(ref(database, 'thietbi/' + label), action);
   }
 
   const minuteButtons = [0.2, 5, 10, 17, 20, 25, 32, 35, 40, 45, 50, 55, 62, 65, 70];
@@ -89,13 +89,12 @@
                         <div class="cell-content-wrapper"><div class="number">${label}</div><div class="time"></div></div>`;
       cell.onclick = () => selectCell(label);
       container.appendChild(cell);
-      allCells[label] = { cell, timer: null, timeEl: cell.querySelector('.time'), remaining: 0 };
+      allCells[label] = { cell, timeEl: cell.querySelector('.time') };
     }
   }
 
   createCells('main-cells-container', 1, 160);
 
-  // Lắng nghe dữ liệu timers từ Firebase
   onValue(ref(database, 'timers'), (snapshot) => {
     const data = snapshot.val() || {};
     const now = Date.now() + serverTimeOffset;
@@ -111,7 +110,10 @@
         if (rem <= 0) {
           cellObj.cell.classList.add('expired');
           cellObj.timeEl.textContent = "HẾT";
-          if (!sentStatus[label]) { notifyESP(label, "ON"); sentStatus[label] = true; }
+          if (!sentStatus[label]) { 
+            notifyESP(label, "ON"); 
+            sentStatus[label] = true; 
+          }
         } else {
           cellObj.cell.classList.remove('expired');
           const m = Math.floor(rem / 60); const s = String(rem % 60).padStart(2, '0');
@@ -155,7 +157,8 @@
     } else if (selectedCell) {
       set(ref(database, 'timers/' + selectedCell), { durationSeconds: min * 60, startTime: serverTimestamp() });
       notifyESP(selectedCell, "OFF");
-      selectCell(selectedCell);
+      allCells[selectedCell].cell.classList.remove('selected');
+      selectedCell = null;
     }
   }
 
