@@ -84,28 +84,18 @@
   const app = initializeApp(firebaseConfig);
   const database = getDatabase(app);
   
-  // BIẾN QUAN TRỌNG: Ngăn chặn gửi lệnh trùng lặp lên Firebase
-  let lastActionSent = {}; 
+  // Quản lý trạng thái đèn từng ô
+  let lastStateSent = {}; 
 
-  function sendCommand(label, action) {
-    if (lastActionSent[label] === action) return; // Nếu lệnh không đổi thì không gửi
-    
+  function notifyESP(label, action) {
+    if (lastStateSent[label] === action) return;
     const commandsRef = ref(database, 'esp_commands');
-    push(commandsRef, {
-      id: String(label),
-      lenh: action,
-      time: serverTimestamp() 
-    }).then(() => {
-        lastActionSent[label] = action;
-        console.log(`Đã gửi lệnh ${action} cho ô ${label}`);
-    });
+    push(commandsRef, { id: String(label), lenh: action, time: serverTimestamp() })
+      .then(() => { lastStateSent[label] = action; });
   }
 
-  const timersRef = ref(database, 'timers');
-  const historyRef = ref(database, 'carHistory');
   const minuteButtons = [0.2, 5, 10, 17, 20, 25, 32, 35, 40, 45, 50, 55, 62, 65, 70];
   const rowTop = document.getElementById('row-minutes-top');
-  
   minuteButtons.forEach(min => {
     const btn = document.createElement('div');
     btn.className = 'button'; btn.textContent = min;
@@ -126,7 +116,6 @@
   let selectedCellsForMultiple = new Set();
   let isSelectCarMode = false;
   let selectedCarLabel = null;
-  let carHistory = {};
   let serverTimeOffset = 0;
 
   onValue(ref(database, '.info/serverTimeOffset'), snap => serverTimeOffset = snap.val());
@@ -136,8 +125,7 @@
     for (let i = start; i <= end; i++) {
       const label = String(i);
       const cell = document.createElement('div');
-      cell.className = 'cell'; cell.id = `cell-${label}`;
-      
+      cell.className = 'cell';
       const undo = document.createElement('div'); undo.className = 'undo'; undo.textContent = '↩';
       const stop = document.createElement('div'); stop.className = 'stop'; stop.textContent = 'Tắt';
       const exch = document.createElement('div'); exch.className = 'exchange'; exch.textContent = 'Đổi';
@@ -151,104 +139,97 @@
       stop.onclick = (e) => { e.stopPropagation(); resetCell(label); };
       exch.onclick = (e) => { e.stopPropagation(); startExchange(label); };
       cell.onclick = () => selectCell(label);
-      
       cell.append(undo, stop, exch, contentWrapper);
       container.appendChild(cell);
       
-      allCells[label] = { cell, timer: null, remaining: -1, lastState: null, origin: null, timeEl: time, numberEl: number, duration: 0, startTime: 0, originalMinutes: 0 };
+      allCells[label] = { 
+        cell, timer: null, remaining: -1, lastState: null, origin: null, 
+        timeEl: time, numberEl: number, duration: 0, startTime: 0, 
+        isAnnounced: false // Khóa chống gửi ON nhiều lần
+      };
+
+      // Lắng nghe RIÊNG LẺ từng ô - Điểm mấu chốt fix lỗi ô này ảnh hưởng ô kia
+      onValue(ref(database, 'timers/' + label), (snapshot) => {
+        const data = snapshot.val();
+        handleCellUpdate(label, data);
+      });
     }
   }
 
   createCells('main-cells-container', 1, 160);
 
+  function handleCellUpdate(label, data) {
+    const cellData = allCells[label];
+    if (cellData.timer) { clearInterval(cellData.timer); cellData.timer = null; }
+
+    if (data && data.startTime) {
+      cellData.duration = data.durationSeconds;
+      cellData.startTime = data.startTime;
+      cellData.origin = data.origin;
+      
+      const updateLoop = () => {
+        const now = Date.now() + serverTimeOffset;
+        const elapsed = Math.floor((now - cellData.startTime) / 1000);
+        const rem = Math.max(0, cellData.duration - elapsed);
+        cellData.remaining = rem;
+
+        if (rem <= 0) {
+          clearInterval(cellData.timer); cellData.timer = null;
+          cellData.cell.classList.add('expired');
+          cellData.timeEl.textContent = 'HẾT';
+          if (!cellData.isAnnounced) {
+            notifyESP(label, "ON");
+            cellData.isAnnounced = true;
+          }
+        } else {
+          cellData.isAnnounced = false;
+          cellData.cell.classList.remove('expired');
+          notifyESP(label, "OFF");
+          updateDisplay(label, rem);
+        }
+      };
+
+      updateLoop();
+      cellData.timer = setInterval(updateLoop, 1000);
+    } else {
+      // Ô Trống
+      cellData.remaining = -1;
+      cellData.isAnnounced = false;
+      cellData.cell.classList.remove('expired');
+      cellData.timeEl.textContent = '';
+      cellData.numberEl.textContent = label;
+      notifyESP(label, "OFF");
+    }
+  }
+
   function resetCell(label) {
     const cellData = allCells[label];
     if (cellData.startTime > 0) {
-        cellData.lastState = { durationSeconds: cellData.duration, originalMinutes: cellData.originalMinutes, origin: cellData.origin, startTime: cellData.startTime };
-        recordHistory(label, cellData.startTime, Date.now() + serverTimeOffset, cellData.originalMinutes);
+      cellData.lastState = { durationSeconds: cellData.duration, origin: cellData.origin, startTime: cellData.startTime };
+      recordHistory(label, cellData.startTime, Date.now() + serverTimeOffset, Math.floor(cellData.duration/60));
     }
-    sendCommand(label, "OFF"); // Tắt ngay lập tức
     remove(ref(database, 'timers/' + label));
+    notifyESP(label, "OFF");
     if (selectedCell === label) clearSelected();
   }
 
   function startTimer(label, durationSeconds, originalMinutes, origin=null) {
-    sendCommand(label, "OFF"); // Đảm bảo tắt đèn khi bắt đầu đếm mới
+    notifyESP(label, "OFF");
     set(ref(database, 'timers/' + label), { 
-        durationSeconds: Math.floor(durationSeconds), 
-        originalMinutes: originalMinutes, 
-        origin: origin, 
-        startTime: serverTimestamp() 
+      durationSeconds: Math.floor(durationSeconds), 
+      originalMinutes: originalMinutes, 
+      origin: origin, 
+      startTime: serverTimestamp() 
     });
   }
 
-  // --- LOGIC ĐỒNG BỘ CHÍNH ---
-  onValue(timersRef, (snapshot) => {
-    const dataAll = snapshot.val() || {};
-    const now = Date.now() + serverTimeOffset;
-
-    Object.keys(allCells).forEach(label => {
-      const cellData = allCells[label];
-      const data = dataAll[label];
-
-      if (data && data.startTime) {
-        const elapsed = Math.floor((now - data.startTime) / 1000);
-        const rem = Math.max(0, data.durationSeconds - elapsed);
-        
-        cellData.duration = data.durationSeconds;
-        cellData.startTime = data.startTime;
-        cellData.originalMinutes = data.originalMinutes;
-        cellData.origin = data.origin;
-        cellData.remaining = rem;
-
-        if (rem <= 0) {
-            // TRẠNG THÁI HẾT GIỜ
-            if (cellData.timer) { clearInterval(cellData.timer); cellData.timer = null; }
-            cellData.cell.classList.add('expired');
-            cellData.timeEl.textContent = 'HẾT';
-            sendCommand(label, "ON"); // CHỈ GỬI 1 LẦN NHỜ sendCommand
-        } else {
-            // TRẠNG THÁI ĐANG CHẠY
-            cellData.cell.classList.remove('expired');
-            sendCommand(label, "OFF");
-            updateDisplay(label, rem);
-            
-            // Làm mới bộ đếm nội bộ
-            if (cellData.timer) clearInterval(cellData.timer);
-            cellData.timer = setInterval(() => {
-                const cNow = Date.now() + serverTimeOffset;
-                const cElapsed = Math.floor((cNow - cellData.startTime) / 1000);
-                const cRem = Math.max(0, cellData.duration - cElapsed);
-                cellData.remaining = cRem;
-                if (cRem <= 0) {
-                    clearInterval(cellData.timer); cellData.timer = null;
-                    cellData.cell.classList.add('expired'); cellData.timeEl.textContent = 'HẾT';
-                    sendCommand(label, "ON");
-                } else {
-                    updateDisplay(label, cRem);
-                }
-            }, 1000);
-        }
-      } else {
-        // TRẠNG THÁI TRỐNG
-        if (cellData.timer) { clearInterval(cellData.timer); cellData.timer = null; }
-        cellData.cell.classList.remove('expired');
-        cellData.timeEl.textContent = '';
-        cellData.numberEl.textContent = label;
-        cellData.remaining = -1;
-        sendCommand(label, "OFF");
-      }
-    });
-  });
-
-  // --- CÁC HÀM TIỆN ÍCH ---
   function selectCell(label) {
     if (isSelectCarMode) {
       selectedCarLabel = label;
       document.getElementById('stats-car-number').textContent = label;
       document.getElementById('stats-selected-car').textContent = `Xe ${label}`;
       updateStatsDisplay(label);
-      isSelectCarMode = false; selectCarButton.classList.remove('active');
+      isSelectCarMode = false; document.getElementById('select-car-button').classList.remove('active');
       return;
     }
     if (exchangeFrom) { transferTimer(exchangeFrom, label); return; }
@@ -272,7 +253,7 @@
       toggleMultipleSelectionMode();
     } else {
       if (!selectedCell) return;
-      if (allCells[selectedCell].remaining > 0) return alert("Ô đang chạy!");
+      if (allCells[selectedCell].remaining > 0) return;
       startTimer(selectedCell, min * 60, min);
       clearSelected();
     }
@@ -289,7 +270,7 @@
     const data = allCells[from];
     if (data.remaining >= 0) {
        set(ref(database, 'timers/' + to), {
-         durationSeconds: data.duration, originalMinutes: data.originalMinutes,
+         durationSeconds: data.duration, originalMinutes: Math.floor(data.duration/60),
          origin: data.origin || from, startTime: data.startTime
        }).then(() => remove(ref(database, 'timers/' + from)));
     }
@@ -299,44 +280,40 @@
   function undoCell(label) {
     const last = allCells[label].lastState;
     if (last && allCells[label].remaining < 0) {
-      startTimer(label, last.durationSeconds, last.originalMinutes, last.origin);
+      startTimer(label, last.durationSeconds, Math.floor(last.durationSeconds/60), last.origin);
       allCells[label].lastState = null;
     }
   }
 
   function startExchange(label) { clearSelected(); exchangeFrom = label; allCells[label].cell.classList.add('selected'); }
   function clearSelected() { Object.values(allCells).forEach(c => c.cell.classList.remove('selected')); selectedCell = null; exchangeFrom = null; selectedCellsForMultiple.clear(); }
-  function toggleMultipleSelectionMode() { isMultipleSelectionMode = !isMultipleSelectionMode; clearSelected(); selectMultipleBtn.classList.toggle('active', isMultipleSelectionMode); }
-  const selectCarButton = document.getElementById('select-car-button');
-  selectCarButton.onclick = () => { isSelectCarMode = !isSelectCarMode; selectCarButton.classList.toggle('active', isSelectCarMode); };
+  function toggleMultipleSelectionMode() { isMultipleSelectionMode = !isMultipleSelectionMode; clearSelected(); document.querySelector('.select-multiple-button').classList.toggle('active', isMultipleSelectionMode); }
+  
+  document.getElementById('select-car-button').onclick = function() {
+    isSelectCarMode = !isSelectCarMode; this.classList.toggle('active', isSelectCarMode);
+  };
 
-  function recordHistory(label, startTime, endTime, durationMinutes) {
-      if (!durationMinutes) return;
-      const specificHistoryRef = ref(database, 'carHistory/' + label);
-      onValue(specificHistoryRef, (snap) => {
-          let list = snap.val() || []; if (!Array.isArray(list)) list = [];
-          if (list.length > 0 && list[list.length-1].start === startTime) return;
-          list.push({ start: startTime, end: endTime, duration: durationMinutes });
-          if (list.length > 15) list.shift();
-          set(specificHistoryRef, list);
-      }, { onlyOnce: true });
+  function recordHistory(label, startTime, endTime, duration) {
+    const historyRef = ref(database, 'carHistory/' + label);
+    push(historyRef, { start: startTime, end: endTime, duration: duration });
   }
 
-  onValue(historyRef, (snapshot) => { carHistory = snapshot.val() || {}; if (selectedCarLabel) updateStatsDisplay(selectedCarLabel); });
-
   function updateStatsDisplay(label) {
-    const history = carHistory[label] || [];
-    const startTimesEl = document.getElementById('stats-start-times');
-    const endTimesEl = document.getElementById('stats-end-times');
-    const durationEl = document.getElementById('stats-duration');
-    startTimesEl.innerHTML = ''; endTimesEl.innerHTML = ''; durationEl.innerHTML = '';
-    history.slice().reverse().forEach(item => {
-      const s = new Date(item.start); const e = new Date(item.end);
-      const format = (d) => `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
-      startTimesEl.appendChild(Object.assign(document.createElement('div'), {className:'history-time', textContent: format(s)}));
-      endTimesEl.appendChild(Object.assign(document.createElement('div'), {className:'history-time', textContent: format(e)}));
-      durationEl.appendChild(Object.assign(document.createElement('div'), {className:'history-time', textContent: item.duration}));
-    });
+    onValue(ref(database, 'carHistory/' + label), (snap) => {
+      const history = snap.val() || {};
+      const startTimesEl = document.getElementById('stats-start-times');
+      const endTimesEl = document.getElementById('stats-end-times');
+      const durationEl = document.getElementById('stats-duration');
+      startTimesEl.innerHTML = ''; endTimesEl.innerHTML = ''; durationEl.innerHTML = '';
+      
+      Object.values(history).reverse().slice(0, 10).forEach(item => {
+        const s = new Date(item.start); const e = new Date(item.end);
+        const format = (d) => `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+        startTimesEl.appendChild(Object.assign(document.createElement('div'), {className:'history-time', textContent: format(s)}));
+        endTimesEl.appendChild(Object.assign(document.createElement('div'), {className:'history-time', textContent: format(e)}));
+        durationEl.appendChild(Object.assign(document.createElement('div'), {className:'history-time', textContent: item.duration}));
+      });
+    }, { onlyOnce: true });
   }
 </script>
 </body>
