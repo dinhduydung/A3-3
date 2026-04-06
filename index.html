@@ -84,14 +84,25 @@
   const app = initializeApp(firebaseConfig);
   const database = getDatabase(app);
   
-  // Quản lý trạng thái đèn từng ô
+  // Trạng thái lệnh cuối cùng gửi lên
   let lastStateSent = {}; 
+  let lastNotifyTime = {};
 
   function notifyESP(label, action) {
-    if (lastStateSent[label] === action) return;
-    const commandsRef = ref(database, 'esp_commands');
-    push(commandsRef, { id: String(label), lenh: action, time: serverTimestamp() })
-      .then(() => { lastStateSent[label] = action; });
+    const now = Date.now();
+    // Nếu lệnh thay đổi HOẶC đã quá 5 giây chưa gửi lại lệnh Bật (để ESP chắc chắn nhận được)
+    if (lastStateSent[label] !== action || (action === "ON" && (now - (lastNotifyTime[label] || 0)) > 5000)) {
+        const commandsRef = ref(database, 'esp_commands');
+        // Gửi 1 cho ON, 0 cho OFF để ESP dễ đọc
+        const val = (action === "ON") ? "1" : "0"; 
+        
+        push(commandsRef, { id: String(label), lenh: val, time: serverTimestamp() })
+          .then(() => { 
+            lastStateSent[label] = action; 
+            lastNotifyTime[label] = now;
+            console.log(`Ô ${label}: Gửi lệnh ${val}`); 
+          });
+    }
   }
 
   const minuteButtons = [0.2, 5, 10, 17, 20, 25, 32, 35, 40, 45, 50, 55, 62, 65, 70];
@@ -144,11 +155,10 @@
       
       allCells[label] = { 
         cell, timer: null, remaining: -1, lastState: null, origin: null, 
-        timeEl: time, numberEl: number, duration: 0, startTime: 0, 
-        isAnnounced: false // Khóa chống gửi ON nhiều lần
+        timeEl: time, numberEl: number, duration: 0, startTime: 0
       };
 
-      // Lắng nghe RIÊNG LẺ từng ô - Điểm mấu chốt fix lỗi ô này ảnh hưởng ô kia
+      // Lắng nghe độc lập từng ô
       onValue(ref(database, 'timers/' + label), (snapshot) => {
         const data = snapshot.val();
         handleCellUpdate(label, data);
@@ -174,27 +184,19 @@
         cellData.remaining = rem;
 
         if (rem <= 0) {
-          clearInterval(cellData.timer); cellData.timer = null;
           cellData.cell.classList.add('expired');
           cellData.timeEl.textContent = 'HẾT';
-          if (!cellData.isAnnounced) {
-            notifyESP(label, "ON");
-            cellData.isAnnounced = true;
-          }
+          notifyESP(label, "ON");
         } else {
-          cellData.isAnnounced = false;
           cellData.cell.classList.remove('expired');
           notifyESP(label, "OFF");
           updateDisplay(label, rem);
         }
       };
-
       updateLoop();
       cellData.timer = setInterval(updateLoop, 1000);
     } else {
-      // Ô Trống
       cellData.remaining = -1;
-      cellData.isAnnounced = false;
       cellData.cell.classList.remove('expired');
       cellData.timeEl.textContent = '';
       cellData.numberEl.textContent = label;
