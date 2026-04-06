@@ -8,7 +8,6 @@
   body { font-family: Arial, sans-serif; background: #fff; margin: 5px; }
   .row { display: flex; flex-wrap: wrap; margin-bottom: 5px; }
   .container-cells { display: flex; flex-wrap: wrap; justify-content: flex-start; }
-  
   .button, .cell {
     display: flex; justify-content: center; align-items: center;
     border: 1px solid #ccc; margin: 2px;
@@ -85,11 +84,11 @@
   const app = initializeApp(firebaseConfig);
   const database = getDatabase(app);
   
-  // BIẾN QUAN TRỌNG: Lưu trạng thái lệnh cuối cùng để không gửi trùng lặp
-  let lastSentState = {}; 
+  // BIẾN QUAN TRỌNG: Ngăn chặn gửi lệnh trùng lặp lên Firebase
+  let lastActionSent = {}; 
 
-  function notifyESP(label, action) {
-    if (lastSentState[label] === action) return; // Nếu lệnh giống hệt lần trước thì bỏ qua
+  function sendCommand(label, action) {
+    if (lastActionSent[label] === action) return; // Nếu lệnh không đổi thì không gửi
     
     const commandsRef = ref(database, 'esp_commands');
     push(commandsRef, {
@@ -97,8 +96,8 @@
       lenh: action,
       time: serverTimestamp() 
     }).then(() => {
-        lastSentState[label] = action;
-        console.log(`Ô ${label}: Gửi lệnh ${action}`);
+        lastActionSent[label] = action;
+        console.log(`Đã gửi lệnh ${action} cho ô ${label}`);
     });
   }
 
@@ -156,11 +155,7 @@
       cell.append(undo, stop, exch, contentWrapper);
       container.appendChild(cell);
       
-      allCells[label] = { 
-        cell, timer: null, remaining: 0, lastState: null, origin: null, 
-        timeEl: time, numberEl: number, duration: 0, startTime: 0, 
-        isExpired: false, originalMinutes: 0 
-      };
+      allCells[label] = { cell, timer: null, remaining: -1, lastState: null, origin: null, timeEl: time, numberEl: number, duration: 0, startTime: 0, originalMinutes: 0 };
     }
   }
 
@@ -172,13 +167,13 @@
         cellData.lastState = { durationSeconds: cellData.duration, originalMinutes: cellData.originalMinutes, origin: cellData.origin, startTime: cellData.startTime };
         recordHistory(label, cellData.startTime, Date.now() + serverTimeOffset, cellData.originalMinutes);
     }
-    notifyESP(label, "OFF"); // Tắt đèn ngay lập tức
+    sendCommand(label, "OFF"); // Tắt ngay lập tức
     remove(ref(database, 'timers/' + label));
     if (selectedCell === label) clearSelected();
   }
 
   function startTimer(label, durationSeconds, originalMinutes, origin=null) {
-    notifyESP(label, "OFF"); // Đảm bảo đèn tắt khi bắt đầu đếm
+    sendCommand(label, "OFF"); // Đảm bảo tắt đèn khi bắt đầu đếm mới
     set(ref(database, 'timers/' + label), { 
         durationSeconds: Math.floor(durationSeconds), 
         originalMinutes: originalMinutes, 
@@ -187,89 +182,84 @@
     });
   }
 
-  // --- LOGIC ĐIỀU KHIỂN CHÍNH (SỬA LỖI TẠI ĐÂY) ---
+  // --- LOGIC ĐỒNG BỘ CHÍNH ---
   onValue(timersRef, (snapshot) => {
-    const firebaseData = snapshot.val() || {};
+    const dataAll = snapshot.val() || {};
     const now = Date.now() + serverTimeOffset;
 
     Object.keys(allCells).forEach(label => {
       const cellData = allCells[label];
-      const data = firebaseData[label];
+      const data = dataAll[label];
 
       if (data && data.startTime) {
         const elapsed = Math.floor((now - data.startTime) / 1000);
-        const remaining = Math.max(0, data.durationSeconds - elapsed);
-
+        const rem = Math.max(0, data.durationSeconds - elapsed);
+        
         cellData.duration = data.durationSeconds;
         cellData.startTime = data.startTime;
         cellData.originalMinutes = data.originalMinutes;
         cellData.origin = data.origin;
-        cellData.remaining = remaining;
+        cellData.remaining = rem;
 
-        if (remaining <= 0) {
-          // HẾT GIỜ
-          if (cellData.timer) { clearInterval(cellData.timer); cellData.timer = null; }
-          cellData.cell.classList.add('expired');
-          cellData.timeEl.textContent = 'HẾT';
-          cellData.isExpired = true;
-          notifyESP(label, "ON"); 
+        if (rem <= 0) {
+            // TRẠNG THÁI HẾT GIỜ
+            if (cellData.timer) { clearInterval(cellData.timer); cellData.timer = null; }
+            cellData.cell.classList.add('expired');
+            cellData.timeEl.textContent = 'HẾT';
+            sendCommand(label, "ON"); // CHỈ GỬI 1 LẦN NHỜ sendCommand
         } else {
-          // ĐANG CHẠY
-          cellData.cell.classList.remove('expired');
-          cellData.isExpired = false;
-          notifyESP(label, "OFF"); 
-          updateDisplay(label, remaining);
-          
-          if (cellData.timer) clearInterval(cellData.timer);
-          cellData.timer = setInterval(() => {
-            const cNow = Date.now() + serverTimeOffset;
-            const cElapsed = Math.floor((cNow - cellData.startTime) / 1000);
-            const cRem = Math.max(0, cellData.duration - cElapsed);
-            if (cRem <= 0) {
-              clearInterval(cellData.timer); cellData.timer = null;
-              cellData.cell.classList.add('expired'); cellData.timeEl.textContent = 'HẾT';
-              notifyESP(label, "ON");
-            } else {
-              updateDisplay(label, cRem);
-            }
-          }, 1000);
+            // TRẠNG THÁI ĐANG CHẠY
+            cellData.cell.classList.remove('expired');
+            sendCommand(label, "OFF");
+            updateDisplay(label, rem);
+            
+            // Làm mới bộ đếm nội bộ
+            if (cellData.timer) clearInterval(cellData.timer);
+            cellData.timer = setInterval(() => {
+                const cNow = Date.now() + serverTimeOffset;
+                const cElapsed = Math.floor((cNow - cellData.startTime) / 1000);
+                const cRem = Math.max(0, cellData.duration - cElapsed);
+                cellData.remaining = cRem;
+                if (cRem <= 0) {
+                    clearInterval(cellData.timer); cellData.timer = null;
+                    cellData.cell.classList.add('expired'); cellData.timeEl.textContent = 'HẾT';
+                    sendCommand(label, "ON");
+                } else {
+                    updateDisplay(label, cRem);
+                }
+            }, 1000);
         }
       } else {
-        // Ô KHÔNG CÓ DỮ LIỆU (PHẢI TẮT ĐÈN)
+        // TRẠNG THÁI TRỐNG
         if (cellData.timer) { clearInterval(cellData.timer); cellData.timer = null; }
         cellData.cell.classList.remove('expired');
-        cellData.cell.classList.remove('selected');
         cellData.timeEl.textContent = '';
         cellData.numberEl.textContent = label;
-        cellData.remaining = 0;
-        cellData.isExpired = false;
-        notifyESP(label, "OFF");
+        cellData.remaining = -1;
+        sendCommand(label, "OFF");
       }
     });
   });
 
-  // --- GIỮ NGUYÊN CÁC HÀM CÒN LẠI ---
+  // --- CÁC HÀM TIỆN ÍCH ---
   function selectCell(label) {
     if (isSelectCarMode) {
       selectedCarLabel = label;
       document.getElementById('stats-car-number').textContent = label;
       document.getElementById('stats-selected-car').textContent = `Xe ${label}`;
       updateStatsDisplay(label);
-      isSelectCarMode = false;
-      selectCarButton.classList.remove('active');
+      isSelectCarMode = false; selectCarButton.classList.remove('active');
       return;
     }
     if (exchangeFrom) { transferTimer(exchangeFrom, label); return; }
     if (isMultipleSelectionMode) {
       if (selectedCellsForMultiple.has(label)) {
-        selectedCellsForMultiple.delete(label);
-        allCells[label].cell.classList.remove('selected');
+        selectedCellsForMultiple.delete(label); allCells[label].cell.classList.remove('selected');
       } else {
-        selectedCellsForMultiple.add(label);
-        allCells[label].cell.classList.add('selected');
+        selectedCellsForMultiple.add(label); allCells[label].cell.classList.add('selected');
       }
     } else {
-      if (selectedCell === label) { clearSelected(); } 
+      if (selectedCell === label) clearSelected();
       else { clearSelected(); selectedCell = label; allCells[label].cell.classList.add('selected'); }
     }
   }
@@ -277,12 +267,12 @@
   function selectMinute(min) {
     if (isMultipleSelectionMode) {
       selectedCellsForMultiple.forEach(label => {
-        if (!allCells[label].isExpired && allCells[label].remaining <= 0) startTimer(label, min * 60, min);
+        if (allCells[label].remaining <= 0) startTimer(label, min * 60, min);
       });
       toggleMultipleSelectionMode();
     } else {
       if (!selectedCell) return;
-      if (allCells[selectedCell].remaining > 0 || allCells[selectedCell].isExpired) return;
+      if (allCells[selectedCell].remaining > 0) return alert("Ô đang chạy!");
       startTimer(selectedCell, min * 60, min);
       clearSelected();
     }
@@ -297,7 +287,7 @@
 
   function transferTimer(from, to) {
     const data = allCells[from];
-    if (data.remaining > 0 || data.isExpired) {
+    if (data.remaining >= 0) {
        set(ref(database, 'timers/' + to), {
          durationSeconds: data.duration, originalMinutes: data.originalMinutes,
          origin: data.origin || from, startTime: data.startTime
@@ -308,7 +298,7 @@
 
   function undoCell(label) {
     const last = allCells[label].lastState;
-    if (last && allCells[label].remaining <= 0 && !allCells[label].isExpired) {
+    if (last && allCells[label].remaining < 0) {
       startTimer(label, last.durationSeconds, last.originalMinutes, last.origin);
       allCells[label].lastState = null;
     }
@@ -324,8 +314,7 @@
       if (!durationMinutes) return;
       const specificHistoryRef = ref(database, 'carHistory/' + label);
       onValue(specificHistoryRef, (snap) => {
-          let list = snap.val() || [];
-          if (!Array.isArray(list)) list = [];
+          let list = snap.val() || []; if (!Array.isArray(list)) list = [];
           if (list.length > 0 && list[list.length-1].start === startTime) return;
           list.push({ start: startTime, end: endTime, duration: durationMinutes });
           if (list.length > 15) list.shift();
@@ -344,10 +333,9 @@
     history.slice().reverse().forEach(item => {
       const s = new Date(item.start); const e = new Date(item.end);
       const format = (d) => `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
-      const sD = document.createElement('div'); sD.className = 'history-time'; sD.textContent = format(s);
-      const eD = document.createElement('div'); eD.className = 'history-time'; eD.textContent = format(e);
-      const dD = document.createElement('div'); dD.className = 'history-time'; dD.textContent = item.duration;
-      startTimesEl.appendChild(sD); endTimesEl.appendChild(eD); durationEl.appendChild(dD);
+      startTimesEl.appendChild(Object.assign(document.createElement('div'), {className:'history-time', textContent: format(s)}));
+      endTimesEl.appendChild(Object.assign(document.createElement('div'), {className:'history-time', textContent: format(e)}));
+      durationEl.appendChild(Object.assign(document.createElement('div'), {className:'history-time', textContent: item.duration}));
     });
   }
 </script>
