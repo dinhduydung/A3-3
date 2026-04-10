@@ -17,10 +17,10 @@
     font-size: 12px; font-weight: bold; position: relative;
     border-radius: 8px; user-select: none;
   }
-  .button { background-color: #4CAF50; color: white; }
+  .button { background-color: #4CAF50; color: white; cursor: pointer; }
   .select-multiple-button { background-color: lightgreen; color: #000; margin-left: 20px; min-width: 80px; font-size: 11px; }
   .select-multiple-button.active { background-color: lightpink; }
-  .cell { background-color: #fff; color: #000; }
+  .cell { background-color: #fff; color: #000; cursor: pointer; }
   .selected { background-color: #FF69B4 !important; color: #000; }
   .expired { animation: blink 1s infinite; background-color: red !important; color: white; }
   @keyframes blink { 50% { opacity: 0.4; } }
@@ -30,8 +30,7 @@
   .cell-content-wrapper { display: flex; flex-direction: column; justify-content: center; align-items: center; width: 100%; height: 100%; text-align: center; box-sizing: border-box; padding: 2px; }
   .number { font-size: 12px; line-height: 1.2; white-space: nowrap; color: #000; }
   .time { font-size: 14px; font-weight: bold; line-height: 1.2; white-space: nowrap; color: #000; margin-top: 2px; }
-  .display-line-1 { font-size: 12px; line-height: 1.2; white-space: nowrap; }
-  .display-line-2 { font-size: 14px; font-weight: bold; line-height: 1.2; white-space: nowrap; }
+  
   .stats-table { margin-top: 20px; border-collapse: collapse; width: 100%; display: flex; flex-direction: column; }
   .stats-header, .stats-row { display: flex; border: 1px solid #ccc; font-size: 14px; font-weight: bold; }
   .stats-header-cell, .stats-cell { padding: 8px; border: 1px solid #ccc; flex: 1; text-align: center; }
@@ -39,7 +38,7 @@
   .stats-header-cell.col-select-car, .stats-cell.col-select-car { flex: 1; }
   .stats-header-cell.col-start-time, .stats-cell.col-start-time, .stats-header-cell.col-end-time, .stats-cell.col-end-time { flex: 1.2; }
   .stats-header-cell.col-duration, .stats-cell.col-duration { flex: 0.8; }
-  .stats-header-cell { background-color: #f2f2f2; font-weight: bold; }
+  .stats-header-cell { background-color: #f2f2f2; }
   .stats-cell-flex-col { display: flex; flex-direction: column; justify-content: center; align-items: center; }
   .select-car-button { background-color: #f2f2f2; cursor: pointer; }
   .select-car-button.active { background-color: lightpink; }
@@ -55,9 +54,9 @@
   <div class="stats-header">
     <div class="stats-header-cell col-car-number">Xe số</div>
     <div class="stats-header-cell col-select-car select-car-button" id="select-car-button">Chọn xe</div>
-    <div class="stats-header-cell col-start-time">Thời gian bắt đầu</div>
-    <div class="stats-header-cell col-end-time">Thời gian kết thúc</div>
-    <div class="stats-header-cell col-duration">Số phút</div>
+    <div class="stats-header-cell col-start-time">Bắt đầu</div>
+    <div class="stats-header-cell col-end-time">Kết thúc</div>
+    <div class="stats-header-cell col-duration">Phút</div>
   </div>
   <div class="stats-row" id="stats-row-container">
     <div class="stats-cell col-car-number" id="stats-car-number"></div>
@@ -85,11 +84,10 @@
   const app = initializeApp(firebaseConfig);
   const database = getDatabase(app);
   
-  // BIẾN QUAN TRỌNG: Lưu trạng thái lệnh cuối cùng để không gửi trùng lặp
   let lastSentState = {}; 
 
   function notifyESP(label, action) {
-    if (lastSentState[label] === action) return; // Nếu lệnh giống hệt lần trước thì bỏ qua
+    if (lastSentState[label] === action) return; 
     
     const commandsRef = ref(database, 'esp_commands');
     push(commandsRef, {
@@ -172,13 +170,13 @@
         cellData.lastState = { durationSeconds: cellData.duration, originalMinutes: cellData.originalMinutes, origin: cellData.origin, startTime: cellData.startTime };
         recordHistory(label, cellData.startTime, Date.now() + serverTimeOffset, cellData.originalMinutes);
     }
-    notifyESP(label, "OFF"); // Tắt đèn ngay lập tức
+    notifyESP(label, "OFF"); 
     remove(ref(database, 'timers/' + label));
     if (selectedCell === label) clearSelected();
   }
 
   function startTimer(label, durationSeconds, originalMinutes, origin=null) {
-    notifyESP(label, "OFF"); // Đảm bảo đèn tắt khi bắt đầu đếm
+    // Không gửi OFF ở đây để tránh xung đột với onValue
     set(ref(database, 'timers/' + label), { 
         durationSeconds: Math.floor(durationSeconds), 
         originalMinutes: originalMinutes, 
@@ -187,7 +185,6 @@
     });
   }
 
-  // --- LOGIC ĐIỀU KHIỂN CHÍNH (SỬA LỖI TẠI ĐÂY) ---
   onValue(timersRef, (snapshot) => {
     const firebaseData = snapshot.val() || {};
     const now = Date.now() + serverTimeOffset;
@@ -207,17 +204,17 @@
         cellData.remaining = remaining;
 
         if (remaining <= 0) {
-          // HẾT GIỜ
+          // TRẠNG THÁI HẾT GIỜ
           if (cellData.timer) { clearInterval(cellData.timer); cellData.timer = null; }
           cellData.cell.classList.add('expired');
           cellData.timeEl.textContent = 'HẾT';
           cellData.isExpired = true;
-          notifyESP(label, "ON"); 
+          notifyESP(label, "ON"); // BẬT ĐÈN
         } else {
-          // ĐANG CHẠY
+          // TRẠNG THÁI ĐANG CHẠY
           cellData.cell.classList.remove('expired');
           cellData.isExpired = false;
-          notifyESP(label, "OFF"); 
+          notifyESP(label, "OFF"); // TẮT ĐÈN KHI ĐANG ĐẾM
           updateDisplay(label, remaining);
           
           if (cellData.timer) clearInterval(cellData.timer);
@@ -228,6 +225,7 @@
             if (cRem <= 0) {
               clearInterval(cellData.timer); cellData.timer = null;
               cellData.cell.classList.add('expired'); cellData.timeEl.textContent = 'HẾT';
+              cellData.isExpired = true;
               notifyESP(label, "ON");
             } else {
               updateDisplay(label, cRem);
@@ -235,20 +233,18 @@
           }, 1000);
         }
       } else {
-        // Ô KHÔNG CÓ DỮ LIỆU (PHẢI TẮT ĐÈN)
+        // TRẠNG THÁI TẮT (TRỐNG)
         if (cellData.timer) { clearInterval(cellData.timer); cellData.timer = null; }
         cellData.cell.classList.remove('expired');
-        cellData.cell.classList.remove('selected');
         cellData.timeEl.textContent = '';
         cellData.numberEl.textContent = label;
         cellData.remaining = 0;
         cellData.isExpired = false;
-        notifyESP(label, "OFF");
+        notifyESP(label, "OFF"); // TẮT ĐÈN
       }
     });
   });
 
-  // --- GIỮ NGUYÊN CÁC HÀM CÒN LẠI ---
   function selectCell(label) {
     if (isSelectCarMode) {
       selectedCarLabel = label;
@@ -315,10 +311,21 @@
   }
 
   function startExchange(label) { clearSelected(); exchangeFrom = label; allCells[label].cell.classList.add('selected'); }
-  function clearSelected() { Object.values(allCells).forEach(c => c.cell.classList.remove('selected')); selectedCell = null; exchangeFrom = null; selectedCellsForMultiple.clear(); }
-  function toggleMultipleSelectionMode() { isMultipleSelectionMode = !isMultipleSelectionMode; clearSelected(); selectMultipleBtn.classList.toggle('active', isMultipleSelectionMode); }
+  function clearSelected() { 
+    Object.values(allCells).forEach(c => c.cell.classList.remove('selected')); 
+    selectedCell = null; exchangeFrom = null; selectedCellsForMultiple.clear(); 
+  }
+  function toggleMultipleSelectionMode() { 
+    isMultipleSelectionMode = !isMultipleSelectionMode; 
+    clearSelected(); 
+    selectMultipleBtn.classList.toggle('active', isMultipleSelectionMode); 
+  }
+
   const selectCarButton = document.getElementById('select-car-button');
-  selectCarButton.onclick = () => { isSelectCarMode = !isSelectCarMode; selectCarButton.classList.toggle('active', isSelectCarMode); };
+  selectCarButton.onclick = () => { 
+    isSelectCarMode = !isSelectCarMode; 
+    selectCarButton.classList.toggle('active', isSelectCarMode); 
+  };
 
   function recordHistory(label, startTime, endTime, durationMinutes) {
       if (!durationMinutes) return;
@@ -333,7 +340,10 @@
       }, { onlyOnce: true });
   }
 
-  onValue(historyRef, (snapshot) => { carHistory = snapshot.val() || {}; if (selectedCarLabel) updateStatsDisplay(selectedCarLabel); });
+  onValue(historyRef, (snapshot) => { 
+    carHistory = snapshot.val() || {}; 
+    if (selectedCarLabel) updateStatsDisplay(selectedCarLabel); 
+  });
 
   function updateStatsDisplay(label) {
     const history = carHistory[label] || [];
